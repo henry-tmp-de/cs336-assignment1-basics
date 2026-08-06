@@ -8,7 +8,7 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
-
+import multiprocessing as mp
 
 def run_linear(
     d_in: int,
@@ -574,6 +574,15 @@ def rebuild(word, best_pair, new_token):
             i += 1
     return tuple(result)
 
+def _pretokenize_batch(batch):
+    """处理一批段，返回这一批的词频字典。每个子进程跑这个。"""
+    local = {}
+    _PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    for segment in batch:
+        for word in re.findall(_PAT, segment):
+            local[word] = local.get(word, 0) + 1
+    return local
+
 
 def run_train_bpe(
     input_path: str | os.PathLike,
@@ -608,15 +617,23 @@ def run_train_bpe(
         vocab[len(vocab)] = st.encode("utf-8")   # 字符串.encode() → bytes
     for b in range(256):                         # 256 个字节
         vocab[len(vocab)] = bytes([b])
-    with open(input_path) as f:
+    with open(input_path,encoding="utf-8") as f:
         content=f.read()
         special_pat = "|".join(re.escape(t) for t in special_tokens)
-        contentlist_special_out=re.split(special_pat,content)
-        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-        chardict={}
-        for segment in contentlist_special_out:
-             for word in re.findall(PAT, segment):
-                chardict[word] = chardict.get(word, 0) + 1
+        segments = re.split(special_pat, content)
+        segments = [s for s in segments if s]  
+        num_workers = kwargs.get("num_workers", 1)
+        if num_workers <= 1:
+            chardict = _pretokenize_batch(segments)  
+        else:
+            k = (len(segments)+num_workers-1)//num_workers
+            batches = [segments[i:i+k] for i in range(0,len(segments),k)]
+            with mp.Pool(processes=num_workers) as pool:
+                per_worker=pool.map(_pretokenize_batch,batches)
+                chardict={}
+                for local in per_worker:
+                    for word,freq in local.items():
+                        chardict[word]=chardict.get(word,0)+freq
         bytesdict= {
                 tuple(bytes([x]) for x in word.encode("utf-8")): freq
                 for word, freq in chardict.items()
