@@ -9,6 +9,7 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 import multiprocessing as mp
+import time
 
 def run_linear(
     d_in: int,
@@ -611,12 +612,17 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
+    timings = kwargs.get("timings", None)
+    verbose = kwargs.get("verbose", 0)
     # ========= 初始化 vocab =========
     vocab = {}                                   # dict[int, bytes]
     for i, st in enumerate(special_tokens):
         vocab[len(vocab)] = st.encode("utf-8")   # 字符串.encode() → bytes
     for b in range(256):                         # 256 个字节
         vocab[len(vocab)] = bytes([b])
+    _t_pre = time.time()
+    if verbose:
+        print(f"  [pretokenize] 开始读文件并预分词（num_workers={kwargs.get('num_workers', 1)}）...", flush=True)
     with open(input_path,encoding="utf-8") as f:
         content=f.read()
         special_pat = "|".join(re.escape(t) for t in special_tokens)
@@ -634,6 +640,8 @@ def run_train_bpe(
                 for local in per_worker:
                     for word,freq in local.items():
                         chardict[word]=chardict.get(word,0)+freq
+        if timings is not None:
+            timings["pretokenize"] = time.time() - _t_pre
         bytesdict= {   #对chardict的统计转换为bytes  eg:{(b' ', b'l', b'a'): 4, (b' ', b'u', b'd', b's', b'd'): 1, (b' ', b's', b'a', b'd'): 1, (b' ', b'i', b's', b'd'): 1, (b' ',): 1}
                 tuple(bytes([x]) for x in word.encode("utf-8")): freq
                 for word, freq in chardict.items()
@@ -646,10 +654,15 @@ def run_train_bpe(
                 pair_counts[word_pair]=pair_counts.get(word_pair,0)+freq
                 pair_words.setdefault(word_pair,{})[word] = freq
                 
+        _t_merge = time.time()
         merge_list=[]
-        while len(vocab) < vocab_size:    
+        _round = 0
+        while len(vocab) < vocab_size:
             # 对byte进行数数
             best_pair=max(pair_counts.items(),key=lambda x:(x[1],x[0]))[0]#找到数值最大的字节流
+            _round += 1
+            if verbose and _round % verbose == 0:
+                print(f"  [merge] 第 {_round} 轮  best={best_pair}  已用 {time.time()-_t_merge:6.1f}s", flush=True)
             newtoken=best_pair[0]+best_pair[1]
             merge_list.append(best_pair)
             affected = list(pair_words[best_pair].items())# 受影响的词: [((1, 2, 3), 3), ((1, 2), 2)]
@@ -677,6 +690,8 @@ def run_train_bpe(
                         pw2 = pair_words.setdefault(p, {})
                         pw2[merged_word] = pw2.get(merged_word, 0) + freq   # ② 只对每个不同 pair 加一次
             vocab[len(vocab)]=newtoken
+        if timings is not None:
+            timings["merge"] = time.time() - _t_merge
         return vocab,merge_list
             
 
