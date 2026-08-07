@@ -634,38 +634,48 @@ def run_train_bpe(
                 for local in per_worker:
                     for word,freq in local.items():
                         chardict[word]=chardict.get(word,0)+freq
-        bytesdict= {
+        bytesdict= {   #对chardict的统计转换为bytes  eg:{(b' ', b'l', b'a'): 4, (b' ', b'u', b'd', b's', b'd'): 1, (b' ', b's', b'a', b'd'): 1, (b' ', b'i', b's', b'd'): 1, (b' ',): 1}
                 tuple(bytes([x]) for x in word.encode("utf-8")): freq
                 for word, freq in chardict.items()
             }
-        pair_counts={}
+        pair_counts = {}#初始 pair_counts: {(1, 2): 5, (2, 3): 3, (4, 5): 5}
+        pair_words = {}#倒排表格  初始 pair_words : {(1, 2): {(1, 2, 3): 3, (1, 2): 2}, (2, 3): {(1, 2, 3): 3}, (4, 5): {(4, 5): 5}}
         for word,freq in bytesdict.items():
-            for i in range(len(word)-1):
+            for i in range(len(word)-1):#统计数量最大的相邻词
                 word_pair=(word[i],word[i+1])
                 pair_counts[word_pair]=pair_counts.get(word_pair,0)+freq
+                pair_words.setdefault(word_pair,{})[word] = freq
+                
         merge_list=[]
         while len(vocab) < vocab_size:    
             # 对byte进行数数
             best_pair=max(pair_counts.items(),key=lambda x:(x[1],x[0]))[0]#找到数值最大的字节流
             newtoken=best_pair[0]+best_pair[1]
             merge_list.append(best_pair)
-            new_bytes_dict={}
-        
-            for word, freq in bytesdict.items():
-                if best_pair in zip(word,word[1:]):
-                    merged_word = rebuild(word, best_pair, newtoken)   # ← 上面那个W函数
-                else:
-                    merged_word = word
-                new_bytes_dict[merged_word] = new_bytes_dict.get(merged_word, 0) + freq
-                if merged_word!= word:
-                    for i in range(len(word)-1):
-                        # 销毁键，更新键，减少对字典的遍历
-                        word_pair=(word[i],word[i+1])
-                        pair_counts[word_pair]=pair_counts.get(word_pair,0)-freq
-                    for i in range(len(merged_word)-1):
-                        merge_word_pair=(merged_word[i],merged_word[i+1])
-                        pair_counts[merge_word_pair]=pair_counts.get(merge_word_pair,0)+freq
-            bytesdict = new_bytes_dict #完成字典更新
+            affected = list(pair_words[best_pair].items())# 受影响的词: [((1, 2, 3), 3), ((1, 2), 2)]
+            for word, freq in affected:
+                #撤旧
+                for i in range(len(word)-1):                   
+                    p = (word[i],word[i+1])
+                    pair_counts[p] = pair_counts.get(p, 0) - freq   # 用 get 兜底，键可能不存在
+                    pw = pair_words.get(p)
+                    if pw is not None:
+                        pw.pop(word, None)
+                        if not pw:
+                            del pair_words[p]
+                merged_word = rebuild(word, best_pair, newtoken)#获取更新后的tuple（）
+                # 改 bytesdict：删旧词、加新词（可能已有同名词，累加）
+                del bytesdict[word]
+                bytesdict[merged_word]=bytesdict.get(merged_word,0) + freq
+                # 加新：把 merged_word 登记进它所有相邻 pair，pair_counts 同步加
+                seen = set()                                  # 这一轮里 merged_word 已登记过的 pair
+                for i in range(len(merged_word) - 1):
+                    p = (merged_word[i], merged_word[i + 1])
+                    pair_counts[p] = pair_counts.get(p, 0) + freq    # ① 不动：按出现次数加，对的
+                    if p not in seen:
+                        seen.add(p)
+                        pw2 = pair_words.setdefault(p, {})
+                        pw2[merged_word] = pw2.get(merged_word, 0) + freq   # ② 只对每个不同 pair 加一次
             vocab[len(vocab)]=newtoken
         return vocab,merge_list
             
